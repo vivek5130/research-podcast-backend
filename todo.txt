@@ -1,0 +1,14 @@
+1. Creat Fast API using Python,
+   Follow Production level folder Structure include
+   - Controller
+   - routes
+   - Models
+   - utils
+   - services
+   - config  ...
+   Keep a Proper Logging Mechanism followd in production
+   Define a logger file for info / error and show or return error in same Structure
+   if we are throwing error to frontend then it should have error code, message, details and if we are logging for debugging then it should have proper structured json with featurename.function.success/error and correspoind message and optional params to keep dynamic
+
+2. Refer https://www.langchain.com/langsmith/observability
+  for adding observability, evaluation framework and we will be 
