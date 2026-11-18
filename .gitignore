@@ -1,4 +1,16 @@
-venv/
+# Secrets: never commit (the template is .env.example)
 .env
-data/*.db
+.env.*
+!.env.example
+
+# Python
+.venv/
 __pycache__/
+*.pyc
+.pytest_cache/
+
+# Vercel
+.vercel/
+
+# Generated audio
+*.mp3

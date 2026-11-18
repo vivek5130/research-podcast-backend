@@ -1,43 +1,68 @@
-"""App entrypoint. Run from backend/:  uvicorn app.main:app --reload"""
+"""FastAPI application: wires settings, middleware, error handling and routes.
 
+Layers (each only calls the ones below it):
+
+    routes/        HTTP: parse/validate input, auth dependencies, cookies
+    controllers/   business logic (generic: schedulers, runs, tick, stages)
+    handlers/      type-specific logic, e.g. handlers/podcast (agent, TTS, email)
+    workers/       generic run executor (one queued job per stage)
+    repositories/  SQL (one module per table)      services/  external APIs
+    models/ schemas/   domain types / API bodies
+    core/          settings, DB pool, security, errors, dependencies
+"""
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config.settings import settings
-from app.db.database import init_db
-from app.routes import ingest_routes, item_routes, query_routes
-from app.utils.errors import register_error_handlers
-from app.utils.logger import log_info
+from app.core import database
+from app.services import storage
+from app.core.config import get_settings
+from app.core.exceptions import register_exception_handlers
+from app.core.timing import TimingMiddleware
+from app.routes import ALL_ROUTERS
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Runs once on startup (before first request) and once on shutdown."""
-    init_db()
-    log_info("app.lifespan.startup", "Server started", env=settings.ENV)
+async def lifespan(_: FastAPI):
+    """Close the DB pool on shutdown."""
     yield
-    log_info("app.lifespan.shutdown", "Server stopped")
+    await database.close_pool()
+    await storage.close()
 
 
-app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
+def create_app() -> FastAPI:
+    """Build and configure the FastAPI app."""
+    settings = get_settings()
+    app = FastAPI(title="DailyCast API", version="1.0.0", lifespan=lifespan)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[origin.strip() for origin in settings.frontend_url.split(",")],
+        allow_credentials=True,  # lets the browser send the session cookie
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    register_exception_handlers(app)
+    app.add_middleware(TimingMiddleware)
+    for router in ALL_ROUTERS:
+        app.include_router(router)
 
-register_error_handlers(app)
+    @app.get("/health", tags=["health"])
+    async def health():
+        """Liveness check (no dependencies)."""
+        return {"ok": True, "queue_mode": settings.queue_mode}
 
-app.include_router(ingest_routes.router)
-app.include_router(item_routes.router)
-app.include_router(query_routes.router)
+    @app.get("/health/db", tags=["health"])
+    async def health_db():
+        """Readiness check: can we reach Postgres?"""
+        row = await database.fetchrow("SELECT now() AS now")
+        return {"ok": True, "db_time": row["now"]}
+
+    return app
 
 
-@app.get("/health", tags=["health"])
-def health():
-    """Simple liveness check."""
-    return {"status": "ok"}
+app = create_app()

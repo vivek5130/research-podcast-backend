@@ -1,0 +1,4 @@
+-r requirements.txt
+uvicorn[standard]==0.34.2
+pytest==8.3.5
+pytest-asyncio==0.26.0
