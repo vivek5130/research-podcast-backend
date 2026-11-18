@@ -1,6 +1,9 @@
-fastapi
-uvicorn[standard]
-python-dotenv
-httpx
-beautifulsoup4
-google-generativeai
+fastapi==0.115.12
+pydantic-settings==2.9.1
+asyncpg==0.30.0
+httpx==0.28.1
+PyJWT[crypto]==2.10.1
+google-genai==1.16.1
+langgraph==0.4.5
+tzdata==2025.2
+pydantic[email]==2.11.4
