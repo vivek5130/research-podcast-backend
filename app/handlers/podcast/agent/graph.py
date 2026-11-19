@@ -1,8 +1,11 @@
 """Research -> script agent, wired with LangGraph.
 
-    plan_queries -> search -> curate -> write_script -> check_length --done--> END
-                                             ^                |
-                                             +---- revise ----+   (max 1 rewrite, keeps the best draft)
+    guard_input -> plan_queries -> search -> curate -> write_script -> check_length --done--> evaluate -> guard_output -> END
+                                                            ^                |
+                                                            +---- revise ----+   (max 1 rewrite, keeps the best draft)
+
+guard_input / guard_output and the PII pass in curate are the guardrails (agent/guardrails.py,
+LangChain PIIMiddleware + a blocked-terms middleware); evaluate scores the draft (agent/evaluation.py) and guard_output then drops ungrounded/unsafe sentences.
 
 The graph's shape is fixed (predictable cost and latency); the only decision the
 agent makes is whether the script needs one rewrite to hit the requested length.
@@ -20,18 +23,24 @@ _compiled_graph = None
 def build_graph():
     """Wire the nodes and edges and compile the graph."""
     graph = StateGraph(ResearchState)
+    graph.add_node("guard_input", nodes.guard_input)
     graph.add_node("plan_queries", nodes.plan_queries)
     graph.add_node("search", nodes.search)
     graph.add_node("curate", nodes.curate)
     graph.add_node("write_script", nodes.write_script)
     graph.add_node("check_length", nodes.check_length)
+    graph.add_node("guard_output", nodes.guard_output)
+    graph.add_node("evaluate", nodes.evaluate)
 
-    graph.set_entry_point("plan_queries")
+    graph.set_entry_point("guard_input")
+    graph.add_edge("guard_input", "plan_queries")
     graph.add_edge("plan_queries", "search")
     graph.add_edge("search", "curate")
     graph.add_edge("curate", "write_script")
     graph.add_edge("write_script", "check_length")
-    graph.add_conditional_edges("check_length", nodes.route_after_check, {"revise": "write_script", "done": END})
+    graph.add_conditional_edges("check_length", nodes.route_after_check, {"revise": "write_script", "done": "evaluate"})
+    graph.add_edge("evaluate", "guard_output")
+    graph.add_edge("guard_output", END)
     return graph.compile()
 
 

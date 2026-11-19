@@ -7,8 +7,9 @@ import asyncio
 
 import httpx
 
+from app.core.config import get_settings
 from app.core.tracing import traced_node
-from app.handlers.podcast.agent import prompts
+from app.handlers.podcast.agent import evaluation, guardrails, prompts
 from app.handlers.podcast.voices import LANGUAGES
 from app.handlers.podcast.agent.state import NoSourcesError, QueryPlan, ResearchState, script_model
 from app.handlers.podcast.agent.text_utils import (
@@ -32,19 +33,55 @@ def _plan(state: ResearchState) -> LengthPlan:
     return length_plan(state.get("duration_seconds") or DEFAULT_DURATION_SECONDS)
 
 
+def _guard(state: ResearchState) -> dict:
+    return dict(state.get("guardrails") or {})
+
+
+@traced_node("guard_input")
+async def guard_input(state: ResearchState) -> ResearchState:
+    """Input guardrails, before anything is searched or sent to the LLM.
+
+    * Content policy (``BlockedTermsMiddleware``): a blocked topic fails the run with a
+      reason naming the category and terms (``ContentPolicyError``, never retried).
+    * PII (``PIIMiddleware``): emails, phone numbers, IDs, keys... are redacted from the
+      topic; only their *types* are recorded for the episode page.
+    """
+    guardrails.check_topic(state["topic"])
+    redaction = guardrails.redact_input(state["topic"])
+    guard = _guard(state)
+    if redaction.types:
+        guard["topic_pii_removed"] = redaction.types
+    return {"topic": redaction.text, "guardrails": guard}
+
+
 @traced_node("plan_queries")
 async def plan_queries(state: ResearchState) -> ResearchState:
-    """Ask the LLM for 3-5 varied search queries; always keep the user's own wording too."""
+    """Ask the LLM for 3-5 varied search queries; always keep the user's own wording too.
+
+    Every query passes the same guardrails as the topic: queries that break the content
+    policy are dropped, and PII is redacted before the query reaches the search API.
+    """
     plan = await llm.generate_structured(
         prompts.PLANNER_PROMPT.format(topic=state["topic"], today=state["today"]),
         QueryPlan,
         system=prompts.PLANNER_SYSTEM,
         temperature=0.3,
     )
+    if not plan.safe:  # input moderation, decided in the same planner call (no extra LLM cost)
+        raise guardrails.ContentPolicyError.moderated(plan.unsafe_category or "unsafe content")
     queries = [q.strip() for q in plan.queries if q.strip()]
     if state["topic"] not in queries:
         queries.insert(0, state["topic"])
-    return {"queries": queries[:MAX_QUERIES]}
+    policy, guard, safe = guardrails.content_policy(), _guard(state), []
+    for query in queries[:MAX_QUERIES]:
+        if policy.find(query):
+            guard["queries_blocked"] = guard.get("queries_blocked", 0) + 1
+            continue
+        redaction = guardrails.redact_input(query)
+        if redaction.types:
+            guard["query_pii_redactions"] = guard.get("query_pii_redactions", 0) + 1
+        safe.append(redaction.text)
+    return {"queries": safe or [state["topic"]], "guardrails": guard}
 
 
 @traced_node("search")
@@ -78,7 +115,17 @@ async def curate(state: ResearchState) -> ResearchState:
     sources = dedupe_and_rank(state["raw_results"], limit=_plan(state).max_sources)
     if not sources:
         raise NoSourcesError("No recent sources found for this topic")
-    return {"sources": sources}
+    # Tool-result guardrail: strip contact details from article text before the writer sees it.
+    guard, cleaned = _guard(state), []
+    for source in sources:
+        text, injected = guardrails.strip_injections(source.get("content") or "")
+        if injected:  # sentences trying to instruct the model ("ignore previous instructions...")
+            guard["injection_sentences_removed"] = guard.get("injection_sentences_removed", 0) + injected
+        redaction = guardrails.redact_source(text)
+        if redaction.types:
+            guard["source_pii_redactions"] = guard.get("source_pii_redactions", 0) + 1
+        cleaned.append({**source, "content": redaction.text})
+    return {"sources": cleaned, "guardrails": guard}
 
 
 async def _write_part(state: ResearchState, plan: LengthPlan, sources: list[dict], part: int, parts: int,
@@ -186,3 +233,47 @@ async def check_length(state: ResearchState) -> ResearchState:
 def route_after_check(state: ResearchState) -> str:
     """Conditional edge: 'revise' while check_length left feedback, else 'done'."""
     return "revise" if state.get("feedback") else "done"
+
+
+@traced_node("evaluate")
+async def evaluate(state: ResearchState) -> ResearchState:
+    """Score the draft (faithfulness, relevance, freshness, ...); see ``agent/evaluation.py``.
+
+    Runs before the output guardrails so the groundedness filter can use the judge's
+    list of unsupported claims.
+    """
+    metrics = await evaluation.evaluate(
+        state["topic"], state["script"], state["sources"], state["word_count"], _plan(state).target_words,
+        with_judge=get_settings().evaluation_enabled,
+    )
+    return {"evaluation": metrics}
+
+
+@traced_node("guard_output")
+async def guard_output(state: ResearchState) -> ResearchState:
+    """Output guardrails before the script is voiced.
+
+    1. Groundedness: sentences carrying claims the judge found in no source are removed.
+    2. Safety: sentences that break the content policy are removed.
+    3. PII (``PIIMiddleware`` ``after_model``): no contact details get voiced.
+    """
+    guard = _guard(state)
+    metrics = dict(state.get("evaluation") or {})
+    script, report = guardrails.filter_script(state["script"], metrics.get("unsupported_claims") or [])
+    guard.update({k: v for k, v in report.items() if v})
+    redaction = guardrails.redact_output(script)
+    if redaction.types:
+        guard["script_pii_removed"] = redaction.types
+    words = word_count(redaction.text)
+    metrics["word_count"] = words
+    if metrics.get("target_words"):
+        metrics["length_accuracy"] = round(max(0.0, 1 - abs(words - metrics["target_words"]) / metrics["target_words"]), 3)
+    metrics["safety"] = {
+        "pii_redactions": len(guard.get("topic_pii_removed", [])) + len(guard.get("script_pii_removed", []))
+        + guard.get("query_pii_redactions", 0) + guard.get("source_pii_redactions", 0),
+        "queries_blocked": guard.get("queries_blocked", 0),
+        "injections_removed": guard.get("injection_sentences_removed", 0),
+        "ungrounded_removed": guard.get("ungrounded_sentences_removed", 0),
+        "unsafe_removed": guard.get("unsafe_sentences_removed", 0),
+    }
+    return {"script": redaction.text, "word_count": words, "guardrails": guard, "evaluation": metrics}

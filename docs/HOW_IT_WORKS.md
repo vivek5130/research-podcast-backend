@@ -289,6 +289,72 @@ Every row is tagged with `run_id`, `user_id`, `stage` (research / synthesize) an
 
 ---
 
+## 7d. Guardrails and evaluation
+
+**Files:** `app/handlers/podcast/agent/guardrails.py`, `app/handlers/podcast/agent/evaluation.py`, `app/handlers/podcast/handler.py`, `frontend/src/components/QualityPanel.tsx`
+
+The agent graph is now:
+
+```
+guard_input -> plan_queries -> search -> curate -> write_script -> check_length -> evaluate -> guard_output
+```
+
+### Guardrails (LangChain agent middleware)
+| Check | Built with | Where it runs | What happens |
+|---|---|---|---|
+| PII in the topic | LangChain `PIIMiddleware` (`email`, `credit_card`, `ip` built in; custom regex detectors for `phone`, `aadhaar`, `pan`, `api_key`) | On save (`validate_config`) and in `guard_input` (`before_model`) | Stripped before the topic is stored, searched or sent to the LLM. The episode page lists the *types* removed, never the values |
+| PII in search queries | same middleware | `plan_queries` | Redacted before the query reaches Tavily |
+| Contact details in articles | same middleware (the `apply_to_tool_results` step) | `curate` | Emails, phone numbers and card numbers removed from source text |
+| Contact details in the script | same middleware, `after_model` (`apply_to_output`) | `guard_output` | Removed before Gnani voices it |
+| Blocked terms | Custom `BlockedTermsMiddleware(AgentMiddleware)` (LangChain has no built-in term filter) | On save, `guard_input`, every search query | Save returns `422 CONTENT_POLICY` with the reason; a run on an older schedule fails immediately (no retries) with e.g. *"Blocked by content policy: the topic contains inappropriate terms in Weapons & explosives instructions ('how to make a bomb')..."*. Blocked search queries are dropped |
+| LLM input moderation | `safe` / `unsafe_category` fields in the planner's structured output (same call, no extra cost) | `plan_queries` | Harmful, hateful, harassing, sexual or illegal requests that slip past the term list fail with *"...flagged by moderation as hate speech..."*. News *about* such events is allowed |
+| Prompt injection | Sentence filter on article text + prompt rule | `curate`, `write_script`, `evaluate` | Sentences like "ignore previous instructions" are removed from sources; the prompts also declare source text untrusted |
+| Groundedness (enforced) | Judge's unsupported claims, matched to script sentences by word overlap | `guard_output` | Sentences carrying claims found in no source are cut before TTS (max 30% of the script; above that the claims are kept and flagged) |
+| Output safety | `BlockedTermsMiddleware` on each script sentence | `guard_output` | Sentences that break the content policy are cut before TTS |
+
+The blocked-terms list targets *requests for* harmful content (weapons/drug-making instructions, self-harm methods,
+sexual content, extremist recruitment, hacking/fraud), not news about those subjects: "Bomb attack in Delhi" or
+"drug seizure in Mumbai" still work. Extra terms can be added with `BLOCKED_TERMS_EXTRA` (comma-separated).
+
+The research agent is a LangGraph `StateGraph` that calls Gemini directly rather than a `create_agent` loop, so the
+middleware hooks (`before_model` / `after_model`) are invoked at the graph's boundaries: the same points
+`create_agent` would call them.
+
+### Evaluation metrics (per episode, `output.evaluation`)
+| Metric | Definition | Source of the idea |
+|---|---|---|
+| Faithfulness | Supported claims / all claims, each supported claim must cite a source number | RAGAS faithfulness; claim-level checking as in FineSurE |
+| Topic relevance | 1-5 rubric with a one-sentence reason | G-Eval style LLM-as-judge |
+| Source utilization | Sources cited by supported claims / sources retrieved | Context-precision proxy |
+| Freshness | Sources published within 3 days / dated sources | Task requirement (current news) |
+| Source diversity | Distinct outlets / sources | Coverage / bias check |
+| Length accuracy | 1 - abs(actual - target) / target, in words after research and in seconds after TTS | Task requirement (episode length) |
+| Safety | PII redactions and blocked queries in this run | Guardrail telemetry |
+
+Faithfulness and relevance come from **one** judge call (temperature 0) on the lite model, so each episode costs one
+extra LLM call; set `EVALUATION_ENABLED=false` to skip it. LLM judges are known to be lenient on faithfulness, so the
+judge must name a source for every supported claim and the unsupported claims are listed on the episode page for a
+human to review. A judge failure never fails the episode: those two metrics are simply left empty. Token use and
+latency per episode are in `llm_run_traces` (section 7b).
+
+### Dashboard insights (`GET /api/runs/insights?days=30`)
+`app/controllers/insights_controller.py` aggregates the signed-in user's recent runs for the dashboard's
+**Quality & reliability** section:
+- **Quality**: averages of the per-episode metrics above.
+- **Reliability**: success rate, automatic and manual retries, and failure reasons grouped into readable buckets
+  (content policy, no sources, queue, Gemini quota, Gnani, ...).
+- **Cost & latency**: average tokens, LLM calls and time to ready per episode (from `llm_run_traces`).
+- **Guardrails**: personal data removed, topics and queries blocked, injection sentences stripped, unsupported and
+  unsafe sentences cut.
+
+### Offline evaluation (`scripts/eval_topics.py`)
+Runs the research agent on a fixed set of 10 topics and prints a scorecard (faithfulness, relevance, freshness,
+diversity, length, tokens, time) plus two guardrail checks: a harmful topic must be blocked, a topic with personal
+data must have it removed. Results are saved to `evals/` as JSON, so prompt or model changes can be compared:
+```bash
+python scripts/eval_topics.py --limit 3 --duration 30
+```
+
 ## 8. API surface
 
 | Method | Path | Auth |

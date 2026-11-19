@@ -27,12 +27,16 @@ class ResearchState(TypedDict, total=False):
     revisions: int           # check_length: how many rewrites were requested
     feedback: str            # check_length: instructions for the next rewrite ("" = accepted)
     best: dict               # check_length: draft closest to the target so far {title, script, word_count}
+    guardrails: dict         # guard_* nodes: what was redacted/blocked (PII types and counts, never values)
+    evaluation: dict         # evaluate: per-episode quality metrics
 
 
 class QueryPlan(BaseModel):
-    """LLM output of the planning step."""
+    """LLM output of the planning step, including an input-moderation verdict (no extra LLM call)."""
 
-    queries: list[str] = Field(min_length=1, max_length=5)
+    safe: bool = Field(default=True, description="False if the request seeks harmful, hateful, abusive, sexual or illegal content")
+    unsafe_category: str | None = Field(default=None, description="Short category when safe is false, e.g. 'hate speech'")
+    queries: list[str] = Field(default_factory=list, max_length=5)
 
 
 class ScriptBase(BaseModel):

@@ -3,7 +3,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
 
-from app.controllers import scheduler_run_controller
+from app.controllers import insights_controller, scheduler_run_controller
 from app.core.dependencies import get_current_user_id
 from app.models.scheduler import SchedulerType
 from app.schemas.scheduler_run import RunDetailResponse, RunSummaryResponse
@@ -21,6 +21,13 @@ async def list_runs(
 ):
     """List my runs across all schedulers, newest first (filter by ``scheduler_id`` or ``type``)."""
     return await scheduler_run_controller.list_runs(user_id, scheduler_id, type, limit)
+
+
+@router.get("/insights")
+async def get_insights(days: int = Query(30, ge=1, le=365), user_id: UUID = Depends(get_current_user_id)):
+    """Dashboard insights over my recent runs: quality (evaluation averages), reliability
+    (success rate, retries, failure reasons), cost/latency (tokens, LLM calls, time) and guardrail activity."""
+    return await insights_controller.get_insights(user_id, days)
 
 
 @router.get("/{run_id}", response_model=RunDetailResponse)

@@ -4,6 +4,7 @@ A generic daily scheduler API (`schedulers` → `scheduler_runs`) with a **podca
 
 - How it works: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md)
 - curl walkthrough: [docs/TESTING.md](docs/TESTING.md)
+- Guardrails (LangChain `PIIMiddleware` + a blocked-terms middleware) and per-episode evaluation metrics, dashboard insights and the offline eval scorecard (`python scripts/eval_topics.py`): [How it works §7d](docs/HOW_IT_WORKS.md#7d-guardrails-and-evaluation)
 
 ## Project structure
 

@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     source_context_chars_max: int = 40_000  # ~10k tokens (a 10-minute episode)
     llm_max_input_chars: int = 60_000  # logged as over-budget above this (~15k tokens)
     words_per_minute: int = 152  # Gnani's measured speaking rate; turns episode length into a word target
+    blocked_terms_extra: str = ""  # extra comma-separated terms for the content policy (category "Custom")
+    evaluation_enabled: bool = True  # score each episode (faithfulness, relevance, ...): one extra LLM call
 
     # Gnani TTS (Vachana API)
     gnani_api_key: str = ""

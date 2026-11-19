@@ -9,9 +9,11 @@ On completion the user is emailed a link to the run page.
 """
 import logging
 
-from app.core.exceptions import PermanentJobError
+from app.core.exceptions import InvalidRequestError, PermanentJobError
 from app.core.tracing import node_scope
 from app.handlers.base import SchedulerHandler
+from app.handlers.podcast.agent import guardrails
+from app.handlers.podcast.agent.evaluation import duration_accuracy
 from app.handlers.podcast.agent.graph import run_research_agent
 from app.handlers.podcast.config import PodcastConfig, PodcastStage
 from app.models.scheduler import SchedulerType
@@ -27,6 +29,26 @@ class PodcastHandler(SchedulerHandler):
     description = "Researches a topic from current news and delivers an audio podcast (15 seconds to 10 minutes)."
     config_model = PodcastConfig
     stages = (PodcastStage.RESEARCH.value, PodcastStage.SYNTHESIZE.value)
+
+    def validate_config(self, config: dict) -> dict:
+        """Schema validation plus guardrails when a schedule is saved.
+
+        * Content policy: a blocked topic is rejected (422 ``CONTENT_POLICY``) with the reason.
+        * PII: emails, phone numbers, IDs... are stripped from the topic before it is stored,
+          so they never reach the database, the schedule name, search or the LLM.
+        """
+        validated = super().validate_config(config)
+        violations = guardrails.content_policy().find(validated["topic"])
+        if violations:
+            raise InvalidRequestError(guardrails.policy_message(violations), code="CONTENT_POLICY")
+        redaction = guardrails.redact_input(validated["topic"])
+        if redaction.types:
+            if len(redaction.text) < 3:
+                raise InvalidRequestError(
+                    f"The topic only contained personal information ({guardrails.describe_pii(redaction.types)}). "
+                    "Describe the news you want instead.", code="INVALID_TOPIC")
+            validated["topic"] = redaction.text
+        return validated
 
     def default_name(self, config: dict) -> str:
         """Use the topic (truncated) as the scheduler's name."""
@@ -53,6 +75,8 @@ class PodcastHandler(SchedulerHandler):
                 {"title": s["title"], "url": s["url"], "published_date": s.get("published_date")}
                 for s in result["sources"]
             ],
+            "guardrails": result.get("guardrails") or {},
+            "evaluation": result.get("evaluation") or {},
         }
 
     async def _synthesize(self, ctx: RunContext) -> dict:
@@ -64,8 +88,11 @@ class PodcastHandler(SchedulerHandler):
         with node_scope("synthesize"):
             audio, duration, timings = await tts.synthesize(script, voice=config.voice, language=config.language)
         path = await storage.upload(f"podcasts/{ctx.user_id}/{ctx.run_id}.mp3", audio, content_type="audio/mpeg")
+        evaluation = {**(ctx.output.get("evaluation") or {}),
+                      "duration_sec": duration, "target_duration_sec": config.duration_seconds,
+                      "duration_accuracy": duration_accuracy(duration, config.duration_seconds)}
         return {"audio_path": path, "duration_sec": duration, "audio_format": "mp3", "timings": timings,
-                "voice": config.voice, "language": config.language}
+                "voice": config.voice, "language": config.language, "evaluation": evaluation}
 
     async def present_output(self, output: dict) -> dict:
         """Hide the private storage path; expose a short-lived signed ``audio_url`` instead."""
