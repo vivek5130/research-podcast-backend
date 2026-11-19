@@ -115,7 +115,10 @@ async def create_scheduler(user_id: UUID, body: SchedulerCreate) -> SchedulerCre
             "is_active": active,
         }
     )
-    run_id = await trigger_run(scheduler.id, user_id) if body.run_now else None
+    try:
+        run_id = await trigger_run(scheduler.id, user_id) if body.run_now else None
+    except queue.QueueError as exc:
+        raise queue.QueueError(f"Schedule saved, but the first episode couldn't start. {exc.message}") from exc
     return SchedulerCreatedResponse(**to_response(scheduler).model_dump(), triggered_run_id=run_id)
 
 
@@ -172,5 +175,10 @@ async def trigger_run(scheduler_id: UUID, user_id: UUID) -> UUID:
     run_id = await scheduler_run_repository.create_pending(
         scheduler_id, user_id, datetime.now(timezone.utc), RunTrigger.MANUAL
     )
-    await queue.enqueue_stage(run_id, get_handler(scheduler.type).first_stage)
+    try:
+        await queue.enqueue_stage(run_id, get_handler(scheduler.type).first_stage)
+    except queue.QueueError as exc:
+        # Don't leave a run stuck at "Queued": mark it failed (retryable from the episode page).
+        await scheduler_run_repository.mark_failed(run_id, f"enqueue: {exc.message}")
+        raise
     return run_id

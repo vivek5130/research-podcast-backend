@@ -46,7 +46,11 @@ async def retry_run(run_id: UUID, user_id: UUID) -> RunDetailResponse:
     if not await scheduler_run_repository.reset_for_retry(run_id, stage):
         raise ConflictError("This run is already being retried")
     # New generation = retry_count after the reset, so QStash doesn't dedupe it against the failed attempt.
-    await queue.enqueue_stage(run_id, stage, generation=row["retry_count"] + 1)
+    try:
+        await queue.enqueue_stage(run_id, stage, generation=row["retry_count"] + 1)
+    except queue.QueueError as exc:
+        await scheduler_run_repository.mark_failed(run_id, f"enqueue: {exc.message}")  # back to failed, not stuck
+        raise
     return await get_run(run_id, user_id)
 
 
