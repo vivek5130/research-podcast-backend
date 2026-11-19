@@ -7,6 +7,8 @@ Stages:
                   output += {audio_path, duration_sec, audio_format}
 On completion the user is emailed a link to the run page.
 """
+import logging
+
 from app.core.exceptions import PermanentJobError
 from app.core.tracing import node_scope
 from app.handlers.base import SchedulerHandler
@@ -16,6 +18,7 @@ from app.models.scheduler import SchedulerType
 from app.models.scheduler_run import RunContext
 from app.services import email, storage, tts
 
+log = logging.getLogger(__name__)
 
 class PodcastHandler(SchedulerHandler):
     """Daily research-to-podcast scheduler."""
@@ -68,7 +71,12 @@ class PodcastHandler(SchedulerHandler):
         """Hide the private storage path; expose a short-lived signed ``audio_url`` instead."""
         shown = {k: v for k, v in output.items() if k != "audio_path"}
         if output.get("audio_path"):
-            shown["audio_url"] = await storage.signed_url(output["audio_path"])
+            try:
+                shown["audio_url"] = await storage.signed_url(output["audio_path"])
+            except storage.StorageError as exc:  # still show the script/sources; explain the missing audio
+                log.warning("audio link for %s unavailable: %s", output["audio_path"], exc.message)
+                shown["audio_url"] = None
+                shown["audio_error"] = exc.message
         return shown
 
     async def on_completed(self, ctx: RunContext, output: dict) -> None:

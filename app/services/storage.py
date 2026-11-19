@@ -12,6 +12,7 @@ import time
 import httpx
 
 from app.core.config import get_settings
+from app.core.exceptions import UpstreamError
 
 SIGNED_URL_TTL = 60 * 60 * 6  # 6 hours (validity of the URL Supabase issues)
 CACHE_TTL = SIGNED_URL_TTL - 60 * 60  # reuse for 5 hours, so a served URL always has 1h+ left
@@ -40,6 +41,19 @@ async def close() -> None:
     _client = None
 
 
+class StorageError(UpstreamError):
+    """Supabase Storage refused or failed a request (bad key, bucket missing, outage)."""
+
+    code = "STORAGE_FAILED"
+
+
+def _check(resp: httpx.Response, action: str) -> None:
+    """Raise a StorageError with the HTTP status and Supabase's message."""
+    if resp.status_code >= 400:
+        hint = " The server's SUPABASE_SERVICE_ROLE_KEY is missing or invalid." if resp.status_code in (401, 403) else ""
+        raise StorageError(f"Storage {action} failed (Supabase HTTP {resp.status_code}: {resp.text[:150]}).{hint}")
+
+
 def _base() -> str:
     """Storage REST base URL."""
     return f"{get_settings().supabase_url.rstrip('/')}/storage/v1"
@@ -53,6 +67,8 @@ def _headers() -> dict:
     * legacy ``service_role`` key (a JWT): sent as both ``apikey`` and Bearer token
     """
     key = get_settings().supabase_service_role_key
+    if not key:
+        raise StorageError("Storage isn't configured: SUPABASE_SERVICE_ROLE_KEY is empty on the server.")
     if key.startswith("sb_"):
         return {"apikey": key}
     return {"Authorization": f"Bearer {key}", "apikey": key}
@@ -67,7 +83,7 @@ async def upload(path: str, data: bytes, content_type: str = "audio/mpeg") -> st
         content=data,
         timeout=120,
     )
-    resp.raise_for_status()
+    _check(resp, "upload")
     _signed_cache.pop(path, None)  # content changed: don't serve an old signed URL
     return path
 
@@ -86,8 +102,9 @@ async def signed_url(path: str, expires_in: int = SIGNED_URL_TTL) -> str | None:
         json={"expiresIn": expires_in},
         timeout=15,
     )
-    if resp.status_code != 200:
+    if resp.status_code in (400, 404):  # Supabase answers 400/404 "Object not found"
         return None
+    _check(resp, "signed URL")
     signed = resp.json().get("signedURL") or resp.json().get("signedUrl")
     if not signed:
         return None

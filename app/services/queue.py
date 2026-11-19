@@ -17,6 +17,7 @@ import httpx
 import jwt
 
 from app.core.config import get_settings
+from app.core.exceptions import UpstreamError
 
 log = logging.getLogger(__name__)
 _local_tasks: set[asyncio.Task] = set()  # strong refs so tasks aren't garbage-collected mid-run
@@ -43,21 +44,42 @@ async def enqueue_stage(run_id: UUID | str, stage: str, generation: int = 0) -> 
         task.add_done_callback(_local_tasks.discard)
         return
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{settings.qstash_url.rstrip('/')}/v2/publish/{stage_url(run_id, stage)}",
-            headers={
-                "Authorization": f"Bearer {settings.qstash_token}",
-                "Content-Type": "application/json",
-                "Upstash-Retries": str(settings.job_max_retries),
-                # Drops accidental double-publishes of the same stage for the same run attempt.
-                "Upstash-Deduplication-Id": f"{run_id}-{stage}-g{generation}",
-            },
-            json={"run_id": str(run_id), "stage": stage},
-            timeout=15,
-        )
-    resp.raise_for_status()
+    if not settings.qstash_token:
+        raise QueueError("Couldn't start the job: QSTASH_TOKEN is not configured on the server.")
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{settings.qstash_url.rstrip('/')}/v2/publish/{stage_url(run_id, stage)}",
+                headers={
+                    "Authorization": f"Bearer {settings.qstash_token}",
+                    "Content-Type": "application/json",
+                    "Upstash-Retries": str(settings.job_max_retries),
+                    # Drops accidental double-publishes of the same stage for the same run attempt.
+                    "Upstash-Deduplication-Id": f"{run_id}-{stage}-g{generation}",
+                },
+                json={"run_id": str(run_id), "stage": stage},
+                timeout=15,
+            )
+    except httpx.HTTPError as exc:
+        raise QueueError(f"Couldn't reach the job queue (QStash): {type(exc).__name__}.") from exc
+    if resp.status_code >= 400:
+        hint = _QSTASH_HINTS.get(resp.status_code, "")
+        log.error("QStash publish %s for run %s failed: HTTP %s %s", stage, run_id, resp.status_code, resp.text[:300])
+        raise QueueError(f"Couldn't start the job: the queue rejected the request (QStash HTTP {resp.status_code}).{hint}")
     log.info("enqueued %s for run %s", stage, run_id)
+
+
+class QueueError(UpstreamError):
+    """Publishing a stage to QStash failed (bad token, QStash down, network)."""
+
+    code = "QUEUE_UNAVAILABLE"
+
+
+_QSTASH_HINTS = {
+    401: " The server's QSTASH_TOKEN is invalid.",
+    403: " The QStash token lacks permission or the plan limit was reached.",
+    429: " QStash rate limit reached; try again in a minute.",
+}
 
 
 def verify_qstash_signature(signature: str | None, body: bytes, url: str) -> bool:

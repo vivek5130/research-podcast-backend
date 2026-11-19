@@ -13,13 +13,20 @@ import httpx
 
 from app.core import tracing
 from app.core.config import get_settings
+from app.core.exceptions import UpstreamError
 
 BITRATE_KBPS = 128
 SAMPLE_RATE = 44100
 
 
-class TTSError(RuntimeError):
-    """Gnani TTS returned an error or no audio."""
+class TTSError(UpstreamError):
+    """Gnani TTS returned an error or no audio (or isn't configured)."""
+
+    code = "TTS_FAILED"
+
+
+_GNANI_HINTS = {401: " The server's GNANI_API_KEY is invalid.", 403: " The Gnani key lacks access or credits ran out.",
+                429: " Gnani rate limit (1 request at a time on this plan)."}
 
 
 def split_into_chunks(text: str, max_chars: int) -> list[str]:
@@ -53,6 +60,8 @@ async def _synthesize_chunk(client: httpx.AsyncClient, text: str, sem: asyncio.S
     Gnani allows a limited number of concurrent requests per account (1 on the
     free tier), so ``sem`` caps concurrency and 429s wait progressively longer.
     """
+    if not get_settings().gnani_api_key:
+        raise TTSError("Voice generation isn't configured: GNANI_API_KEY is empty on the server.")
     s = get_settings()
     payload = {
         "text": text,
@@ -100,7 +109,8 @@ async def _synthesize_chunk(client: httpx.AsyncClient, text: str, sem: asyncio.S
             if resp.status_code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
                 await asyncio.sleep(2 * (attempt + 1))  # 2, 4, 6, 8 s
                 continue
-            raise TTSError(f"Gnani TTS {resp.status_code}: {resp.text[:300]}")
+            raise TTSError(f"Voice generation failed (Gnani HTTP {resp.status_code}: {resp.text[:150]})."
+                           f"{_GNANI_HINTS.get(resp.status_code, '')}")
     raise TTSError("Gnani TTS failed after retries")
 
 
