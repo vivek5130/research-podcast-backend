@@ -1,13 +1,28 @@
 """Request/response bodies for ``/api/auth``."""
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 
 class GoogleSignInRequest(BaseModel):
     """The Google ID token returned to the browser by Google Identity Services."""
 
     credential: str
+
+
+class PasswordSignUpRequest(BaseModel):
+    """Create an email + password account."""
+
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+    name: str | None = Field(default=None, max_length=80)
+
+
+class PasswordSignInRequest(BaseModel):
+    """Sign in with email + password."""
+
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=128)
 
 
 class DevSignInRequest(BaseModel):

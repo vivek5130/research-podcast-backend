@@ -128,6 +128,13 @@ curl -s -b $JAR $API/api/auth/session        # {"id":"...","email":"YOUR_EMAIL",
 ```
 Use the email where you want to receive the "podcast ready" emails.
 
+### Email + password (works in production too)
+```bash
+curl -s -c $JAR -X POST $API/api/auth/signup -H "Content-Type: application/json" \n  -d '{"email":"you@example.com","password":"at-least-8-chars","name":"You"}'      # 201, or 409 EMAIL_TAKEN
+curl -s -c $JAR -X POST $API/api/auth/signin/password -H "Content-Type: application/json" \n  -d '{"email":"you@example.com","password":"at-least-8-chars"}'                    # 200, or 401 INVALID_CREDENTIALS
+curl -s -b $JAR $API/api/auth/session
+```
+
 ### Real Google sign-in (what the frontend does)
 ```bash
 curl -s -c $JAR -X POST $API/api/auth/signin/google -H "Content-Type: application/json" \

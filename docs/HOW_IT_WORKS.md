@@ -63,6 +63,8 @@ Three kinds of callers, each authenticated differently:
 | Endpoint | What it does |
 |---|---|
 | `POST /api/auth/signin/google` | Verifies the Google ID token, upserts the user, sets the session cookie |
+| `POST /api/auth/signup` | Creates an email + password account (password 8–128 chars), sets the session cookie. 409 `EMAIL_TAKEN` if the email exists |
+| `POST /api/auth/signin/password` | Checks email + password, sets the session cookie. 401 `INVALID_CREDENTIALS` on any mismatch |
 | `POST /api/auth/signout` | Clears the session cookie |
 | `GET /api/auth/session` | Returns the current user, or 401. The frontend calls it on load. |
 | `POST /api/auth/signin/dev` | **Local only** (`ALLOW_DEV_LOGIN=true`): sign in by email and also get the token for curl |
@@ -70,12 +72,21 @@ Three kinds of callers, each authenticated differently:
 1. The frontend shows Google's sign-in button. Google returns an **ID token**, a JWT signed by Google.
 2. `verify_google_id_token()` checks it against Google's public keys (JWKS, cached), plus `aud == GOOGLE_CLIENT_ID`, `iss`, expiry and `email_verified`.
 3. The user is upserted by `google_sub`, Google's stable id. Emails can change; `sub` doesn't.
+   If no account has that `sub` but one has the same email (e.g. created with a password), Google is linked to it.
+   Because Google has just proven the person owns that email, any password set before is removed, so nobody can
+   pre-register someone else's email and keep access once the real owner signs in.
 4. We issue **our own** HS256 session JWT (`sub = users.id`, 7 days) and set it as a cookie with these flags:
    - **httpOnly**: page JavaScript can't read it, so an XSS bug can't steal the session.
    - **Secure**: sent only over HTTPS. `SESSION_COOKIE_SECURE=false` only for localhost.
    - **SameSite=Lax**: the browser doesn't attach it to cross-site POSTs, which blocks CSRF.
    - The Next.js app proxies `/api/*` to the backend, so the cookie is first-party.
 5. `get_current_user_id` reads the cookie first, then a Bearer header for curl and scripts.
+
+**Email + password.** One account per email (case-insensitive unique index, migration `006_password_auth.sql`).
+Passwords are hashed with **scrypt** (Python stdlib, random 16-byte salt, N=2^14) and compared in constant time.
+Sign-in returns the same error for an unknown email, a wrong password and a Google-only account, and still hashes
+a dummy password when the email is unknown, so neither the message nor the timing reveals who has an account.
+Not included (would come next): email verification, password reset, and rate limiting of sign-in attempts.
 
 **Isolation.**
 - Every user-facing SQL query has `WHERE user_id = $current_user`.
@@ -283,6 +294,8 @@ Every row is tagged with `run_id`, `user_id`, `stage` (research / synthesize) an
 | Method | Path | Auth |
 |---|---|---|
 | POST | `/api/auth/signin/google` | none (Google ID token in body) |
+| POST | `/api/auth/signup` | none (email, password, name?) |
+| POST | `/api/auth/signin/password` | none (email, password) |
 | POST | `/api/auth/signout` | — |
 | GET | `/api/auth/session` | session |
 | GET | `/api/schedulers/types` | session |

@@ -18,6 +18,8 @@ from app.schemas.auth import (
     DevSessionResponse,
     DevSignInRequest,
     GoogleSignInRequest,
+    PasswordSignInRequest,
+    PasswordSignUpRequest,
     SessionResponse,
     UserResponse,
 )
@@ -43,6 +45,22 @@ def _set_session_cookie(response: Response, session: IssuedSession) -> None:
 async def sign_in_with_google(body: GoogleSignInRequest, response: Response):
     """Exchange a Google ID token for a session cookie."""
     session = await auth_controller.sign_in_with_google(body.credential)
+    _set_session_cookie(response, session)
+    return SessionResponse(user=session.user, expires_at=int(session.expires_at.timestamp()))
+
+
+@router.post("/signup", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
+async def sign_up(body: PasswordSignUpRequest, response: Response):
+    """Create an email + password account (password: 8-128 chars) and start a session. 409 if the email is taken."""
+    session = await auth_controller.sign_up_with_password(body)
+    _set_session_cookie(response, session)
+    return SessionResponse(user=session.user, expires_at=int(session.expires_at.timestamp()))
+
+
+@router.post("/signin/password", response_model=SessionResponse)
+async def sign_in_with_password(body: PasswordSignInRequest, response: Response):
+    """Sign in with email + password. 401 INVALID_CREDENTIALS on any mismatch."""
+    session = await auth_controller.sign_in_with_password(body)
     _set_session_cookie(response, session)
     return SessionResponse(user=session.user, expires_at=int(session.expires_at.timestamp()))
 

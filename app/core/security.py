@@ -1,11 +1,16 @@
-"""Token handling: verify Google ID tokens, issue and decode our session JWTs.
+"""Credentials: Google ID tokens, password hashes, and our session JWTs.
 
-Sign-in flow:
-1. The frontend obtains a Google **ID token** (Google Identity Services).
-2. ``verify_google_id_token`` checks it against Google's public keys (JWKS).
-3. We issue our **own** HS256 session JWT (``issue_session_token``) whose ``sub`` is
-   our user id. It is set as an httpOnly cookie (and accepted as a Bearer token).
+Sign-in flows (both end in the same session cookie):
+* Google: the frontend obtains a Google **ID token**; ``verify_google_id_token``
+  checks it against Google's public keys (JWKS).
+* Email + password: ``hash_password`` / ``verify_password`` (scrypt, stdlib only).
+Then we issue our **own** HS256 session JWT (``issue_session_token``) whose ``sub`` is
+our user id. It is set as an httpOnly cookie (and accepted as a Bearer token).
 """
+import base64
+import hashlib
+import hmac
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
@@ -40,6 +45,35 @@ def verify_google_id_token(token: str) -> dict:
     if not claims.get("email_verified"):
         raise AuthError("Google email not verified")
     return claims
+
+
+_SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2**14, 8, 1  # ~16 MB, ~50 ms per hash: slow enough to resist guessing
+
+
+def hash_password(password: str) -> str:
+    """Hash a password with scrypt and a random salt. Format: ``scrypt$n$r$p$salt$hash`` (base64)."""
+    salt = os.urandom(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=32)
+    b64 = lambda b: base64.b64encode(b).decode()  # noqa: E731
+    return f"scrypt${_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}${b64(salt)}${b64(digest)}"
+
+
+def verify_password(password: str, stored: str | None) -> bool:
+    """Constant-time check of ``password`` against a stored hash.
+
+    With ``stored=None`` (unknown email, or a Google-only account) a dummy hash is
+    still computed, so response time doesn't reveal whether the account exists.
+    """
+    try:
+        _, n, r, p, salt, expected = (stored or _DUMMY_HASH).split("$")
+        digest = hashlib.scrypt(password.encode(), salt=base64.b64decode(salt), n=int(n), r=int(r), p=int(p),
+                                dklen=len(base64.b64decode(expected)))
+    except (ValueError, TypeError):
+        return False
+    return stored is not None and hmac.compare_digest(digest, base64.b64decode(expected))
+
+
+_DUMMY_HASH = hash_password("timing-equalizer")
 
 
 def parse_duration(value: str) -> timedelta:
