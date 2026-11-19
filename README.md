@@ -95,7 +95,7 @@ curl -X POST http://localhost:3001/internal/scheduler/tick -H "X-Cron-Secret: lo
 
 | Problem | Fix |
 |---|---|
-| `uvicorn: command not found` | The venv isn't active. Activate it, or use `.venv\Scripts\python -m uvicorn ...` |
+| `uvicorn: command not found` / `not recognized` | Install the **dev** requirements: `pip install -r requirements-dev.txt` (`requirements.txt` is the production set Vercel uses and has no uvicorn). If it's installed, the venv isn't active: activate it, or use `.venv\Scripts\python -m uvicorn ...` |
 | `Address already in use` / port 3001 busy | Another server is running. Stop it, or use `--port 3002` (and change `BACKEND_URL` in `frontend/.env.local`) |
 | `/health/db` fails with `getaddrinfo failed` | URL-encode special characters in the DB password (`@` → `%40`) |
 | PowerShell blocks `Activate.ps1` | Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once |
