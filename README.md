@@ -110,6 +110,8 @@ python scripts/run_agent.py "startup funding announced in the last 24 hours" --t
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | POST | `/api/auth/signin/google` | none | Google ID token → session cookie |
+| POST | `/api/auth/signup` | none | Create an email + password account → session cookie (409 if taken) |
+| POST | `/api/auth/signin/password` | none | Email + password → session cookie (401 if wrong) |
 | POST | `/api/auth/signin/dev` | none | **Local only** (`ALLOW_DEV_LOGIN=true`): sign in by email (also returns a Bearer token) |
 | POST | `/api/auth/signout` | — | Clear the session cookie |
 | GET | `/api/auth/session` | session | Current user, or 401 |

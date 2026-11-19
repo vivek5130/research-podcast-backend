@@ -288,3 +288,28 @@ def test_qstash_dedup_id_changes_per_retry_generation(monkeypatch):
     asyncio.run(queue.enqueue_stage("run-1", "research"))
     asyncio.run(queue.enqueue_stage("run-1", "research", generation=1))
     assert sent == ["run-1-research-g0", "run-1-research-g1"]
+
+
+# ---- password auth ----
+def test_password_hash_roundtrip_and_salting():
+    from app.core.security import hash_password, verify_password
+
+    h1, h2 = hash_password("correct horse"), hash_password("correct horse")
+    assert h1 != h2 and h1.startswith("scrypt$")  # random salt per hash
+    assert verify_password("correct horse", h1)
+    assert not verify_password("wrong", h1)
+    assert not verify_password("correct horse", None)  # unknown user / Google-only account
+    assert not verify_password("x", "garbage")
+
+
+def test_password_signup_schema_limits():
+    import pytest
+    from pydantic import ValidationError
+
+    from app.schemas.auth import PasswordSignUpRequest
+
+    PasswordSignUpRequest(email="a@b.co", password="12345678")
+    with pytest.raises(ValidationError):
+        PasswordSignUpRequest(email="a@b.co", password="short")
+    with pytest.raises(ValidationError):
+        PasswordSignUpRequest(email="not-an-email", password="12345678")
